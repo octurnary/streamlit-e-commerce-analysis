@@ -26,6 +26,15 @@ BRAZIL_THEME = {
     "white": "#FFFFFF",
 }
 
+SEGMENT_ORDER = ["Champions", "Loyal Customers", "Potential Loyalists", "At Risk", "Lost / Inactive"]
+SEGMENT_COLOR_MAP = {
+    "Champions": "#0B5D1E",
+    "Loyal Customers": "#1F8A3A",
+    "Potential Loyalists": "#57B36A",
+    "At Risk": "#7BC67B",
+    "Lost / Inactive": "#B7E36C",
+}
+
 st.markdown(
     """
     <style>
@@ -97,20 +106,45 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
 @st.cache_data(show_spinner=False)
 def load_static_data():
-    data_file = Path(__file__).resolve().parents[1] / "dashboard" / "main_data.csv"
+    data_file = Path(__file__).resolve().parent / "main_data.csv"
     df = pd.read_csv(data_file, keep_default_na=False)
     return {row["section"]: json.loads(row["payload"]) for _, row in df.iterrows()}
 
+
+def ensure_datetime(df, col="order_purchase_timestamp"):
+    if df.empty or col not in df.columns:
+        return df
+    out = df.copy()
+    out[col] = pd.to_datetime(out[col])
+    return out
+
+
+def filter_period(df, start_date, end_date, col="order_purchase_timestamp"):
+    if df.empty or col not in df.columns:
+        return df
+    return df[(df[col] >= pd.Timestamp(start_date)) & (df[col] <= pd.Timestamp(end_date))].copy()
+
+
 DATA = load_static_data()
 
-monthly_stats = pd.DataFrame(DATA["monthly_stats"])
-category_sales = pd.DataFrame(DATA["category_sales"])
-geo_stats = pd.DataFrame(DATA["geo_stats"])
-seg_count = pd.DataFrame(DATA["segment_counts"])
-rfm_stats = pd.DataFrame(DATA["rfm_stats"])
-geo_points_all = pd.DataFrame(DATA["geo_points"])
+meta = DATA["metadata"]
+monthly_stats_all = ensure_datetime(pd.DataFrame(DATA["monthly_stats"]))
+category_sales_monthly_all = ensure_datetime(pd.DataFrame(DATA.get("category_sales_monthly", [])))
+geo_stats_monthly_all = ensure_datetime(pd.DataFrame(DATA.get("geo_stats_monthly", [])))
+segment_counts_monthly_all = ensure_datetime(pd.DataFrame(DATA.get("segment_counts_monthly", [])))
+geo_points_monthly_all = ensure_datetime(pd.DataFrame(DATA.get("geo_points_monthly", [])))
+rfm_stats_base = pd.DataFrame(DATA["rfm_stats"])
+
+available_start = pd.to_datetime(meta["period_start"]).date()
+available_end = pd.to_datetime(meta["period_end"]).date()
+
+if "filter_start" not in st.session_state:
+    st.session_state["filter_start"] = available_start
+if "filter_end" not in st.session_state:
+    st.session_state["filter_end"] = available_end
 
 st.title("Dashboard Analisis E-Commerce Public Dataset")
 st.markdown(
@@ -124,7 +158,8 @@ st.markdown(
         margin-bottom: 0.8rem;
         box-shadow: 0 8px 20px rgba(0, 0, 0, 0.38);
     ">
-        Dashboard ini menjelaskan tren penjualan dan revenue dari data e-commerce salah satu perusahaan di Brazil selama periode 2017-2018. Dashboard ini juga menampilkan performa produk, distribusi pelanggan, serta segmentasi pelanggan untuk mendukung analisis bisnis.
+        Dashboard ini disusun mengikuti analisis terbaru di notebook (SMART business questions),
+        dengan data simulasi bulanan periode Januari 2017 - Agustus 2018 agar tetap ringan saat deployment.
     </div>
     """,
     unsafe_allow_html=True,
@@ -133,18 +168,92 @@ st.markdown(
 with st.sidebar:
     st.header("Filter Interaktif")
     top_n_categories = st.slider("Jumlah kategori teratas", 5, 20, 10)
-    map_sample_size = st.slider("Jumlah titik pada peta", 500, len(geo_points_all), 2000, step=500)
 
-geo_points = geo_points_all.head(map_sample_size)
+    with st.form("date_filter_form"):
+        selected_range = st.date_input(
+            "Rentang waktu analisis",
+            value=(st.session_state["filter_start"], st.session_state["filter_end"]),
+            min_value=available_start,
+            max_value=available_end,
+        )
+        apply_range = st.form_submit_button("Terapkan Rentang Waktu")
 
-meta = DATA["metadata"]
+    if apply_range:
+        if isinstance(selected_range, tuple) and len(selected_range) == 2:
+            st.session_state["filter_start"], st.session_state["filter_end"] = selected_range
+        else:
+            st.warning("Pilih tanggal mulai dan tanggal akhir.")
+
+start_date = st.session_state["filter_start"]
+end_date = st.session_state["filter_end"]
+
+if start_date > end_date:
+    st.error("Tanggal mulai tidak boleh lebih besar dari tanggal akhir.")
+    st.stop()
+
+monthly_stats = filter_period(monthly_stats_all, start_date, end_date)
+if monthly_stats.empty:
+    st.warning("Tidak ada data pada rentang waktu yang dipilih.")
+    st.stop()
+
+category_sales = (
+    filter_period(category_sales_monthly_all, start_date, end_date)
+    .groupby("product_category_name_english", as_index=False)["total_sold"]
+    .sum()
+    .sort_values("total_sold", ascending=False)
+)
+
+geo_stats = (
+    filter_period(geo_stats_monthly_all, start_date, end_date)
+    .groupby("customer_state", as_index=False)[["total_orders", "unique_customers"]]
+    .sum()
+    .sort_values("total_orders", ascending=False)
+)
+
+seg_count = (
+    filter_period(segment_counts_monthly_all, start_date, end_date)
+    .groupby("segment", as_index=False)["count"]
+    .sum()
+)
+seg_count["segment"] = pd.Categorical(seg_count["segment"], categories=SEGMENT_ORDER, ordered=True)
+seg_count = seg_count.sort_values("segment")
+
+geo_points_pool = filter_period(geo_points_monthly_all, start_date, end_date)
+if geo_points_pool.empty:
+    geo_points_pool = pd.DataFrame(DATA["geo_points"])
+
+max_points = len(geo_points_pool)
+if max_points == 0:
+    st.warning("Tidak ada titik geospasial pada rentang waktu yang dipilih.")
+    st.stop()
+
+min_points = min(500, max_points)
+default_points = min(2000, max_points)
+with st.sidebar:
+    map_step = 500 if max_points >= 1000 else max(10, max_points // 10)
+    map_sample_size = st.slider("Jumlah titik pada peta", min_points, max_points, default_points, step=map_step)
+
+geo_points = geo_points_pool.head(map_sample_size)
+
+kpi_total_orders = int(monthly_stats["order_count"].sum())
+kpi_total_revenue = float(monthly_stats["total_revenue"].sum())
+kpi_active_states = int((geo_stats["total_orders"] > 0).sum()) if not geo_stats.empty else 0
+kpi_unique_customers = int(seg_count["count"].sum()) if not seg_count.empty else 0
+
+rfm_stats = rfm_stats_base.copy()
+if not rfm_stats.empty:
+    for col in ["recency", "frequency", "monetary"]:
+        rfm_stats.loc[rfm_stats["metric"] == "count", col] = float(kpi_unique_customers)
+
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("Total Order", f"{meta['kpi_total_orders']:,}")
-col2.metric("Total Revenue", f"R$ {meta['kpi_total_revenue']:,.0f}")
-col3.metric("State Aktif", f"{meta['kpi_active_states']:,}")
-col4.metric("Pelanggan Unik", f"{meta['kpi_unique_customers']:,}")
+col1.metric("Total Order", f"{kpi_total_orders:,}")
+col2.metric("Total Revenue", f"R$ {kpi_total_revenue:,.0f}")
+col3.metric("State Aktif", f"{kpi_active_states:,}")
+col4.metric("Pelanggan (Simulasi)", f"{kpi_unique_customers:,}")
 
-st.caption(f"Periode data analisis: {meta['period_start']} sampai {meta['period_end']}")
+st.caption(
+    f"Periode data analisis: {start_date.strftime('%d %b %Y')} sampai {end_date.strftime('%d %b %Y')}"
+)
 st.divider()
 
 q1, q2, q3, q4, q5, q6 = st.tabs(
@@ -159,7 +268,9 @@ q1, q2, q3, q4, q5, q6 = st.tabs(
 )
 
 with q1:
-    st.subheader("Tren performa penjualan dan revenue bulanan (2017-2018)")
+    st.subheader(
+        "Pada periode terpilih, bagaimana tren performa penjualan (jumlah order) dan berapa revenue per bulannya?"
+    )
 
     fig_q1 = go.Figure()
     fig_q1.add_trace(
@@ -214,10 +325,10 @@ with q1:
 <div class="insight-box">
 <strong>Insight Pertanyaan 1:</strong>
 <ul>
-  <li>Tren penjualan menunjukkan <strong>pertumbuhan yang konsisten dan signifikan</strong> sepanjang 2017 hingga awal 2018</li>
-  <li>Terdapat <strong>lonjakan tajam pada November 2017</strong>, kemungkinan besar dipicu oleh event promosi besar seperti <em>Black Friday</em>; ini menjadi puncak penjualan tertinggi dalam dataset</li>
-  <li><strong>Revenue dan jumlah order bergerak searah</strong> (berkorelasi positif), mengindikasikan nilai transaksi rata-rata yang relatif stabil</li>
-  <li>Sepanjang pertengahan 2018, angka penjualan stabil di level tinggi, menandakan bisnis yang kian matang dan basis pelanggan yang sudah bertumbuh</li>
+  <li>Pada periode terpilih, jumlah order dan revenue bulanan menunjukkan tren naik dari awal 2017 hingga puncak di akhir 2017/awal 2018.</li>
+  <li>Lonjakan paling menonjol terjadi pada <strong>November 2017</strong> sebagai puncak performa bulanan.</li>
+  <li>Pergerakan revenue searah dengan jumlah order, menandakan kenaikan transaksi menjadi pendorong utama pendapatan.</li>
+  <li>Sepanjang 2018 performa cenderung stabil di level tinggi dibanding fase pertumbuhan awal.</li>
 </ul>
 </div>
         """,
@@ -225,7 +336,9 @@ with q1:
     )
 
 with q2:
-    st.subheader("Kategori produk paling banyak dan paling sedikit terjual")
+    st.subheader(
+        "Pada periode terpilih, kategori produk mana yang paling tinggi dan paling rendah penjualannya, serta kontribusi Top kategori?"
+    )
 
     top_n = category_sales.head(top_n_categories)
     bot_n = category_sales.tail(top_n_categories)
@@ -270,10 +383,14 @@ with q2:
         )
         st.plotly_chart(fig_bottom, use_container_width=True)
 
+    total_items_sold = int(category_sales["total_sold"].sum()) if not category_sales.empty else 0
+    top_n_share = (top_n["total_sold"].sum() / total_items_sold * 100) if total_items_sold else 0
+
     st.write(
         f"Total kategori: **{len(category_sales):,}** | "
         f"Terlaris: **{category_sales.iloc[0]['product_category_name_english']}** ({category_sales.iloc[0]['total_sold']:,} item) | "
-        f"Tersedikit: **{category_sales.iloc[-1]['product_category_name_english']}** ({category_sales.iloc[-1]['total_sold']:,} item)"
+        f"Tersedikit: **{category_sales.iloc[-1]['product_category_name_english']}** ({category_sales.iloc[-1]['total_sold']:,} item) | "
+        f"Kontribusi Top {top_n_categories}: **{top_n_share:.2f}%**"
     )
 
     st.markdown(
@@ -281,10 +398,9 @@ with q2:
 <div class="insight-box">
 <strong>Insight Pertanyaan 2:</strong>
 <ul>
-  <li>Kategori <strong>bed_bath_table</strong>, <strong>health_beauty</strong>, dan <strong>sports_leisure</strong> adalah tiga kategori terlaris, mencerminkan kebutuhan sehari-hari pelanggan belanja online</li>
-  <li>Dominasi kategori kebutuhan rumah tangga dan kesehatan menunjukkan karakteristik belanja online masyarakat Brazil</li>
-  <li>Kategori dengan penjualan terendah adalah produk niche dan spesifik seperti <strong>security_and_services</strong> serta <strong>fashion_childrens_clothes</strong></li>
-  <li><strong>Rekomendasi:</strong> untuk bisnis yaitu lebih difokuskan untuk meningkatkan stok dan promosi pada kategori terlaris, lalu evaluasi apakah kategori tersedikit layak dipertahankan atau perlu strategi khusus</li>
+  <li>Pada periode terpilih, kategori <strong>bed_bath_table</strong>, <strong>health_beauty</strong>, dan <strong>sports_leisure</strong> konsisten berada pada kontributor utama penjualan.</li>
+  <li>Top kategori menyumbang porsi besar dari total item terjual sehingga layak diprioritaskan pada alokasi stok dan promosi.</li>
+  <li>Kategori terbawah berkontribusi kecil dan dapat dievaluasi untuk strategi long-tail, efisiensi stok, atau kampanye niche.</li>
 </ul>
 </div>
         """,
@@ -292,7 +408,9 @@ with q2:
     )
 
 with q3:
-    st.subheader("Distribusi pelanggan berdasarkan state di Brazil")
+    st.subheader(
+        "Pada periode terpilih, state mana yang paling besar kontribusi order-nya dan berapa porsi Top 3 state?"
+    )
 
     top10_states = geo_stats.head(10).copy()
     top5_states = geo_stats.head(5).copy()
@@ -343,7 +461,7 @@ with q3:
         st.plotly_chart(fig_geo_pie, use_container_width=True)
 
     total_orders = geo_stats["total_orders"].sum()
-    top3_pct = geo_stats.head(3)["total_orders"].sum() / total_orders * 100
+    top3_pct = geo_stats.head(3)["total_orders"].sum() / total_orders * 100 if total_orders else 0
     st.info(
         f"State teratas: **{geo_stats.iloc[0]['customer_state']}** | "
         f"Share 3 state teratas: **{top3_pct:.1f}%** dari total order"
@@ -354,10 +472,9 @@ with q3:
 <div class="insight-box">
 <strong>Insight Pertanyaan 3:</strong>
 <ul>
-  <li><strong>Sao Paulo (SP)</strong> mendominasi distribusi belanja online dengan nilai sebesar 40,494 (42,9%), sangat jauh daripada negara bagian lain, yang mencerminkan konsentrasi ekonomi digital di kota Sao Paulo Brazil</li>
-  <li><strong>Rio de Janeiro (RJ)</strong> dan <strong>Minas Gerais (MG)</strong> berada di posisi 2 dan 3, sejalan  dengan status kota metropolitan</li>
-  <li>Ketiga state teratas (SP, RJ, MG) menyumbang sekitar <strong>66% total order</strong> yang menunjukkan ketimpangan geografis antar state di Brazil</li>
-  <li><strong>Rekomendasi:</strong> Optimalkan infrastruktur logistik dan warehouse di wilayah SP sebagai hub distribusi utama</li>
+  <li>Pada periode terpilih, distribusi order terkonsentrasi pada state besar seperti <strong>SP</strong>, lalu diikuti <strong>RJ</strong> dan <strong>MG</strong>.</li>
+  <li>Metrik share Top 3 state menunjukkan tingkat konsentrasi pasar dan membantu menentukan prioritas wilayah operasional.</li>
+  <li>State berkontribusi tertinggi cocok diprioritaskan untuk SLA pengiriman, kapasitas gudang, dan kampanye retention.</li>
 </ul>
 </div>
         """,
@@ -365,7 +482,9 @@ with q3:
     )
 
 with q4:
-    st.subheader("Segmentasi pelanggan berdasarkan RFM")
+    st.subheader(
+        "Pada periode terpilih, bagaimana komposisi segmen pelanggan RFM dan segmen prioritas retensi?"
+    )
 
     left, right = st.columns(2)
 
@@ -376,13 +495,7 @@ with q4:
             y="count",
             color="segment",
             title="Jumlah Pelanggan per Segmen",
-            color_discrete_map={
-                "Champions": "#0B5D1E",
-                "Loyal Customers": "#1F8A3A",
-                "Potential Loyalists": "#57B36A",
-                "At Risk": "#7BC67B",
-                "Lost / Inactive": "#B7E36C",
-            },
+            color_discrete_map=SEGMENT_COLOR_MAP,
         )
         fig_seg_bar.update_layout(
             height=450,
@@ -401,13 +514,7 @@ with q4:
             title="Komposisi Segmen Pelanggan (%)",
             hole=0.45,
             color="segment",
-            color_discrete_map={
-                "Champions": "#0B5D1E",
-                "Loyal Customers": "#1F8A3A",
-                "Potential Loyalists": "#57B36A",
-                "At Risk": "#7BC67B",
-                "Lost / Inactive": "#B7E36C",
-            },
+            color_discrete_map=SEGMENT_COLOR_MAP,
         )
         fig_seg_pie.update_layout(
             height=450,
@@ -423,13 +530,9 @@ with q4:
 <div class="insight-box">
 <strong>Insight Segmentasi RFM:</strong>
 <ul>
-  <li><em>Calon Pelanggan loyal (47.4%)</em> cukup besar sehingga perusahaan perlu fokus pada peningkatan frekuensi belanja untuk mengubah mereka menjadi pelanggan loyal</li>
-  <li><em>Risiko Churn (39.1%)</em>, gabungan segmen At Risk dan Lost cukup besar sehingga diperlukan strategi agar pelanggan tidak benar-benar pergi</li>
-  <li><em>Kelangkaan pelanggan Champions (0.1%)</em> sehingga perlu strategi eskalasi dari segmen Loyal Customers</li>
-  <li><strong>Rekomendasi Aksi:</strong></li>
-  <li>Champions: Berikan apresiasi dan perlakuan VIP.</li>
-  <li>Loyal &amp; Potential: Dorong pembelian berulang dengan promo personal atau membership.</li>
-  <li>At Risk &amp; Lost: Kirim kampanye win-back (diskon besar) atau survei untuk reaktivasi.</li>
+  <li>Komposisi segmen pada periode terpilih menunjukkan porsi terbesar berada di <em>Potential Loyalists</em>.</li>
+  <li>Gabungan segmen <em>At Risk</em> dan <em>Lost / Inactive</em> tetap signifikan sehingga butuh kampanye win-back yang terencana.</li>
+  <li>Prioritas aksi retensi: dorong repeat purchase pada Potential Loyalists dan pertahankan Loyal/Champions dengan benefit eksklusif.</li>
 </ul>
 </div>
         """,
@@ -462,11 +565,11 @@ with q5:
 <div class="insight-box">
 <strong>Insight Geospatial Analysis:</strong>
 <ul>
-  <li>Visualisasi peta memperlihatkan <strong>titik-titik merah terkonsentrasi di wilayah pesisir tenggara Brazil</strong>, khususnya area metropolitan Sao Paulo, Rio de Janeiro, dan Belo Horizonte</li>
-  <li>Pola distribusi ini konsisten dengan data ekonomi Brazil di wilayah <strong>tenggara adalah pusat perekonomian</strong> negara</li>
-  <li>Wilayah <strong>Sul (Selatan)</strong> seperti Parana (PR), Rio Grande do Sul (RS), dan Santa Catarina (SC) menunjukkan pertumbuhan e-commerce yang aktif dan dapat menjadi target ekspansi berikutnya</li>
-  <li><strong>Kawasan utara (Amazon region)</strong> hampir tidak memiliki pelanggan, alasannya karena keterbatasan infrastruktur internet dan akses logistik e-commerce</li>
-  <li>Analisis ini menggunakan data koordinat nyata dari <code>geolocation</code> yang dikaitkan langsung dengan <code>customers</code> melalui kode pos</li>
+  <li>Visualisasi peta memperlihatkan titik-titik merah terkonsentrasi di wilayah pesisir tenggara Brazil, khususnya area metropolitan Sao Paulo, Rio de Janeiro, dan Belo Horizonte.</li>
+  <li>Pola distribusi ini konsisten dengan data ekonomi Brazil bahwa wilayah tenggara adalah pusat perekonomian negara.</li>
+  <li>Wilayah Sul (Parana, Rio Grande do Sul, Santa Catarina) menunjukkan aktivitas e-commerce aktif dan potensial untuk ekspansi.</li>
+  <li>Kawasan utara (Amazon region) relatif minim pelanggan, sejalan dengan tantangan infrastruktur internet dan logistik e-commerce.</li>
+  <li>Analisis ini menggunakan data koordinat geolocation yang dikaitkan dengan data customers melalui kode pos.</li>
 </ul>
 </div>
         """,
@@ -478,27 +581,24 @@ with q6:
 
     st.markdown(
         """
-Setelah dilakukan analisis eksplorasi dan visualisasi di atas,dapat diambil kesimpulan bahwa
+Setelah dilakukan analisis eksplorasi dan visualisasi di atas, dapat diambil kesimpulan bahwa:
 
 ### 1. Tren Penjualan & Revenue *(Pertanyaan 1)*
-Bisnis menunjukkan **pertumbuhan yang konsisten dan signifikan** dari Januari 2017 hingga pertengahan 2018. Puncak penjualan terjadi pada **November 2017**, yang terjadi karena adanya event promosi besar seperti *Black Friday*. Revenue dan jumlah order bergerak searah (korelasi positif), menandakan nilai rata-rata transaksi yang stabil. Tren ini mengindikasikan bisnis yang sehat dan sedang dalam fase pertumbuhan.
+Pada periode terpilih, performa penjualan bulanan menunjukkan tren meningkat dari awal 2017 lalu stabil di level tinggi pada 2018. Puncak performa terjadi sekitar November 2017, dan revenue bergerak searah dengan jumlah order.
 
 ### 2. Performa Kategori Produk *(Pertanyaan 2)*
-Kategori **bed_bath_table**, **health_beauty**, dan **sports_leisure** mendominasi penjualan. Sebaliknya, kategori niche seperti **security_and_services** dan **fashion_childrens_clothes** memiliki volume sangat rendah. Perusahaan belanja online perlu untuk *fokus pada investasi stok dan promosi pada kategori terlaris*, serta evaluasi kelayakan ekonomi kategori yang underperforming.
+Kategori bed_bath_table, health_beauty, dan sports_leisure menjadi kontributor utama volume penjualan. Metrik kontribusi Top kategori membantu penentuan prioritas stok dan anggaran promosi secara lebih terukur.
 
 ### 3. Demografi Geografis Pelanggan *(Pertanyaan 3)*
-Pelanggan sangat terkonsentrasi di wilayah tenggara Brazil, terutama **São Paulo (SP)**, **Rio de Janeiro (RJ)**, dan **Minas Gerais (MG)**, dimana ketiganya menyumbang sebesar 66% dari total order. . Perusahaan belanja online perlu untuk *mengoptimalkan infrastruktur di SP sebagai hub utama* dan memperluas jangkauan logistik ke wilayah yang potensial seperti wilayah Sul (Selatan) dan wilayah Barat.
+Order terkonsentrasi pada state besar seperti SP, RJ, dan MG. Share Top 3 state menjadi indikator praktis untuk strategi kapasitas logistik dan prioritas operasional regional.
 
 ### 4. Segmentasi Pelanggan RFM *(Pertanyaan 4)*
-Analisis RFM menunjukkan bahwa segmen terbesar adalah **calon pelanggan loyal (47.4%)**, sehingga perusahaan perlu fokus mendorong peningkatan frekuensi belanja agar mereka naik menjadi pelanggan loyal. Di sisi lain, **risiko churn (39.1%)** dari segmen **At Risk** dan **Lost** juga cukup tinggi, sehingga diperlukan strategi retensi dan reaktivasi. Sementara itu, pelanggan **Champions** masih sangat sedikit (0.1%), sehingga perlu strategi untuk mendorong pelanggan loyal naik ke segmen ini.
-
-**Rekomendasi aksi:**
-- **Champions:** berikan apresiasi dan perlakuan VIP.
-- **Loyal & Potential:** dorong pembelian berulang melalui promo personal atau membership.
-- **At Risk & Lost:** lakukan kampanye *win-back* seperti diskon besar atau survei reaktivasi.
+Mayoritas pelanggan berada pada segmen Potential Loyalists, sementara porsi At Risk dan Lost / Inactive tetap penting untuk strategi retensi. Fokus utama adalah meningkatkan repeat purchase dan menjalankan win-back campaign.
 
 ### 5. Analisis Geospasial *(Tambahan)*
-Analisis geospasial menunjukkan bahwa pelanggan terkonsentrasi di **wilayah tenggara Brazil**, terutama di sekitar **Sao Paulo, Rio de Janeiro, dan Belo Horizonte**, yang memang merupakan pusat ekonomi utama negara. Wilayah **selatan** seperti **Parana, Rio Grande do Sul, dan Santa Catarina** juga terlihat memiliki aktivitas e-commerce yang cukup kuat dan berpotensi menjadi area ekspansi berikutnya. Sebaliknya, **wilayah utara** masih memiliki jumlah pelanggan yang sangat rendah, kemungkinan dipengaruhi oleh keterbatasan infrastruktur internet dan logistik. Secara keseluruhan, persebaran pelanggan mencerminkan bahwa aktivitas e-commerce sangat dipengaruhi oleh kekuatan ekonomi dan ketersediaan infrastruktur di setiap wilayah.
+Persebaran pelanggan terpadat berada di wilayah tenggara Brazil, konsisten dengan pusat ekonomi utama negara. Area selatan juga aktif, sedangkan wilayah utara relatif rendah, sehingga strategi ekspansi dan distribusi perlu dibedakan antar wilayah.
+
+> Catatan: metrik non-bulanan pada dashboard disajikan menggunakan simulasi distribusi bulanan agar interaktif dan ringan untuk deployment satu file data.
         """
     )
 
