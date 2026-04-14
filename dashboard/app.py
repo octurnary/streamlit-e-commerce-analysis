@@ -35,6 +35,22 @@ SEGMENT_COLOR_MAP = {
     "Lost / Inactive": "#B7E36C",
 }
 
+INTERPRETASI_EDA_Q1 = """**Interpretasi EDA Plot Q1:**
+- Persebaran total orders bulanan menunjukkan pola distribusi yang tercermin dari nilai skewness dan jumlah outlier pada output angka penting. Kondisi ini menandakan adanya bulan-bulan tertentu dengan performa yang jauh berbeda dari mayoritas bulan lainnya.
+- Persebaran total revenue bulanan menunjukkan pola distribusi yang tercermin dari nilai skewness dan jumlah outlier pada output angka penting. Kondisi ini menandakan adanya bulan-bulan tertentu dengan performa revenue yang jauh berbeda dari mayoritas bulan lainnya."""
+
+INTERPRETASI_EDA_Q2 = """**Interpretasi EDA Plot Q2:**
+- Persebaran total item terjual per kategori cenderung tidak merata dan tercermin pada nilai skewness serta jumlah outlier pada output angka penting. Ini menunjukkan adanya beberapa kategori yang performanya sangat menonjol dibanding mayoritas kategori lain.
+- Persebaran revenue item per kategori juga menunjukkan konsentrasi pada sebagian kecil kategori, terlihat dari nilai skewness dan outlier yang teridentifikasi. Artinya kontribusi revenue antar kategori belum tersebar secara seimbang."""
+
+INTERPRETASI_EDA_Q3 = """**Interpretasi EDA Plot Q3:**
+- Distribusi order antar state menunjukkan pola yang tercermin pada nilai skewness dan jumlah outlier pada output angka menunjukkan bahwa terdapat beberapa state dengan jumlah order jauh di atas state lainnya sehingga pasar bersifat terkonsentrasi."""
+
+INTERPRETASI_EDA_Q4 = """**Interpretasi EDA Plot Q4:**
+- Persebaran recency pelanggan terlihat dari nilai skewness dan jumlah outlier pada output angka penting; pola ini menunjukkan sebagian pelanggan memiliki jarak transaksi terakhir yang sangat berbeda dari mayoritas.
+- Persebaran frequency pelanggan menunjukkan adanya kelompok pelanggan dengan intensitas belanja ekstrem (outlier), sehingga frekuensi pembelian cenderung tidak merata.
+- Persebaran monetary pelanggan juga menampilkan outlier bernilai tinggi, yang menandakan sebagian kecil pelanggan berkontribusi jauh lebih besar terhadap total nilai transaksi."""
+
 st.markdown(
     """
     <style>
@@ -128,6 +144,98 @@ def filter_period(df, start_date, end_date, col="order_purchase_timestamp"):
     return df[(df[col] >= pd.Timestamp(start_date)) & (df[col] <= pd.Timestamp(end_date))].copy()
 
 
+def iqr_outlier_count(series):
+    s = pd.to_numeric(series, errors="coerce").dropna()
+    if s.empty:
+        return 0
+    q1 = s.quantile(0.25)
+    q3 = s.quantile(0.75)
+    iqr = q3 - q1
+    lower = q1 - (1.5 * iqr)
+    upper = q3 + (1.5 * iqr)
+    return int(((s < lower) | (s > upper)).sum())
+
+
+def build_plot_stats(df, variables):
+    rows = []
+    for var in variables:
+        if var not in df.columns:
+            continue
+        s = pd.to_numeric(df[var], errors="coerce").dropna()
+        rows.append(
+            {
+                "variabel": var,
+                "skewness": round(float(s.skew()), 3) if not s.empty else None,
+                "jumlah_outlier_iqr": iqr_outlier_count(s),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def robust_qcut_from_rank(series, reverse_labels=False):
+    s = pd.to_numeric(series, errors="coerce")
+    ranks = s.rank(method="first", ascending=True)
+    bins = min(5, int(ranks.nunique()))
+    if bins <= 1:
+        return pd.Series([3.0] * len(series), index=series.index)
+    labels = list(range(1, bins + 1))
+    if reverse_labels:
+        labels = labels[::-1]
+    return pd.qcut(ranks, q=bins, labels=labels, duplicates="drop").astype(float)
+
+
+def segment_customer_eda(score):
+    if score >= 13:
+        return "Champions"
+    if score >= 10:
+        return "Loyal Customers"
+    if score >= 7:
+        return "Potential Loyalists"
+    if score >= 5:
+        return "At Risk"
+    return "Lost / Inactive"
+
+
+def render_dist_box(df, col, title):
+    if col not in df.columns or df.empty:
+        st.info(f"Tidak ada data untuk {title}.")
+        return
+
+    left, right = st.columns(2)
+    with left:
+        fig_hist = px.histogram(
+            df,
+            x=col,
+            nbins=30,
+            title=f"Distribusi {title}",
+            color_discrete_sequence=[BRAZIL_THEME["green_soft"]],
+        )
+        fig_hist.update_layout(
+            height=320,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor=BRAZIL_THEME["bg_plot"],
+            font=dict(color=BRAZIL_THEME["text_light"]),
+            margin=dict(l=10, r=10, t=50, b=10),
+        )
+        st.plotly_chart(fig_hist, use_container_width=True)
+
+    with right:
+        fig_box = px.box(
+            df,
+            x=col,
+            title=f"Box Plot {title}",
+            color_discrete_sequence=[BRAZIL_THEME["green_lime"]],
+        )
+        fig_box.update_layout(
+            height=320,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor=BRAZIL_THEME["bg_plot"],
+            font=dict(color=BRAZIL_THEME["text_light"]),
+            margin=dict(l=10, r=10, t=50, b=10),
+        )
+        st.plotly_chart(fig_box, use_container_width=True)
+
+
 DATA = load_static_data()
 
 meta = DATA["metadata"]
@@ -137,6 +245,10 @@ geo_stats_monthly_all = ensure_datetime(pd.DataFrame(DATA.get("geo_stats_monthly
 segment_counts_monthly_all = ensure_datetime(pd.DataFrame(DATA.get("segment_counts_monthly", [])))
 geo_points_monthly_all = ensure_datetime(pd.DataFrame(DATA.get("geo_points_monthly", [])))
 rfm_stats_base = pd.DataFrame(DATA["rfm_stats"])
+eda_q1_agg_all = ensure_datetime(pd.DataFrame(DATA.get("eda_q1_agg", [])))
+eda_q2_agg_monthly_all = ensure_datetime(pd.DataFrame(DATA.get("eda_q2_agg_monthly", [])))
+eda_q3_agg_monthly_all = ensure_datetime(pd.DataFrame(DATA.get("eda_q3_agg_monthly", [])))
+eda_plot_q4_source_all = ensure_datetime(pd.DataFrame(DATA.get("eda_plot_q4_source", [])))
 
 available_start = pd.to_datetime(meta["period_start"]).date()
 available_end = pd.to_datetime(meta["period_end"]).date()
@@ -245,6 +357,77 @@ if not rfm_stats.empty:
     for col in ["recency", "frequency", "monetary"]:
         rfm_stats.loc[rfm_stats["metric"] == "count", col] = float(kpi_unique_customers)
 
+# EDA dashboard datasets (sinkron dari section tambahan main_data.csv)
+eda_q1_agg = filter_period(eda_q1_agg_all, start_date, end_date)
+if eda_q1_agg.empty and not monthly_stats.empty:
+    eda_q1_agg = monthly_stats[["order_purchase_timestamp", "order_count", "total_revenue"]].rename(
+        columns={"order_count": "total_orders"}
+    )
+    eda_q1_agg["avg_revenue_per_order"] = eda_q1_agg["total_revenue"] / eda_q1_agg["total_orders"]
+
+eda_q2_agg = (
+    filter_period(eda_q2_agg_monthly_all, start_date, end_date)
+    .groupby("product_category_name_english", as_index=False)[["total_sold", "unique_orders", "total_item_revenue"]]
+    .sum()
+    .sort_values("total_sold", ascending=False)
+)
+if not eda_q2_agg.empty:
+    eda_q2_agg["item_share_pct"] = (
+        eda_q2_agg["total_sold"] / eda_q2_agg["total_sold"].sum() * 100
+    )
+
+eda_q3_agg = (
+    filter_period(eda_q3_agg_monthly_all, start_date, end_date)
+    .groupby("customer_state", as_index=False)[["total_orders", "unique_customers"]]
+    .sum()
+    .sort_values("total_orders", ascending=False)
+)
+if not eda_q3_agg.empty:
+    eda_q3_agg["order_share_pct"] = (
+        eda_q3_agg["total_orders"] / eda_q3_agg["total_orders"].sum() * 100
+    )
+
+eda_q4_source = filter_period(eda_plot_q4_source_all, start_date, end_date)
+if not eda_q4_source.empty:
+    eda_q4_source = eda_q4_source.copy()
+    eda_q4_source["payment_value"] = pd.to_numeric(eda_q4_source["payment_value"], errors="coerce").fillna(0)
+
+if eda_q4_source.empty:
+    eda_q4_rfm = pd.DataFrame(columns=["customer_unique_id", "recency", "frequency", "monetary", "segment"])
+    eda_q4_segment = pd.DataFrame(columns=["segment", "total_customers", "avg_recency", "avg_frequency", "avg_monetary", "customer_share_pct"])
+else:
+    snapshot_date = pd.Timestamp(end_date) + pd.Timedelta(days=1)
+    eda_q4_rfm = (
+        eda_q4_source
+        .groupby("customer_unique_id", as_index=False)
+        .agg(
+            recency=("order_purchase_timestamp", lambda x: (snapshot_date - x.max()).days),
+            frequency=("order_id", "nunique"),
+            monetary=("payment_value", "sum"),
+        )
+    )
+    eda_q4_rfm["r_score"] = robust_qcut_from_rank(eda_q4_rfm["recency"], reverse_labels=True)
+    eda_q4_rfm["f_score"] = robust_qcut_from_rank(eda_q4_rfm["frequency"], reverse_labels=False)
+    eda_q4_rfm["m_score"] = robust_qcut_from_rank(eda_q4_rfm["monetary"], reverse_labels=False)
+    eda_q4_rfm["rfm_score"] = eda_q4_rfm[["r_score", "f_score", "m_score"]].sum(axis=1)
+    eda_q4_rfm["segment"] = eda_q4_rfm["rfm_score"].apply(segment_customer_eda)
+
+    eda_q4_segment = (
+        eda_q4_rfm
+        .groupby("segment", as_index=False)
+        .agg(
+            total_customers=("customer_unique_id", "count"),
+            avg_recency=("recency", "mean"),
+            avg_frequency=("frequency", "mean"),
+            avg_monetary=("monetary", "mean"),
+        )
+    )
+    eda_q4_segment["customer_share_pct"] = (
+        eda_q4_segment["total_customers"] / eda_q4_segment["total_customers"].sum() * 100
+    )
+    eda_q4_segment["segment"] = pd.Categorical(eda_q4_segment["segment"], categories=SEGMENT_ORDER, ordered=True)
+    eda_q4_segment = eda_q4_segment.sort_values("segment")
+
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Total Order", f"{kpi_total_orders:,}")
 col2.metric("Total Revenue", f"R$ {kpi_total_revenue:,.0f}")
@@ -256,8 +439,9 @@ st.caption(
 )
 st.divider()
 
-q1, q2, q3, q4, q5, q6 = st.tabs(
+eda_tab, q1, q2, q3, q4, q5, q6 = st.tabs(
     [
+        "EDA (Agregasi & Plot)",
         "Pertanyaan 1: Tren Penjualan",
         "Pertanyaan 2: Kategori Produk",
         "Pertanyaan 3: Demografi Geografis",
@@ -266,6 +450,48 @@ q1, q2, q3, q4, q5, q6 = st.tabs(
         "Kesimpulan",
     ]
 )
+
+with eda_tab:
+    st.subheader("Exploratory Data Analysis (EDA) - Agregasi & Plot")
+    st.caption("Bagian ini menampilkan sinkronisasi hasil EDA agregasi dan EDA plot dari notebook ke dashboard interaktif.")
+
+    st.markdown("### Pertanyaan 1 - Tren Penjualan & Revenue Bulanan")
+    st.dataframe(eda_q1_agg, use_container_width=True)
+    render_dist_box(eda_q1_agg, "total_orders", "Total Orders Bulanan")
+    render_dist_box(eda_q1_agg, "total_revenue", "Total Revenue Bulanan")
+    st.dataframe(build_plot_stats(eda_q1_agg, ["total_orders", "total_revenue"]), use_container_width=True)
+    st.markdown(INTERPRETASI_EDA_Q1)
+    st.divider()
+
+    st.markdown("### Pertanyaan 2 - Performa Kategori Produk")
+    st.dataframe(eda_q2_agg, use_container_width=True)
+    render_dist_box(eda_q2_agg, "total_sold", "Total Item Terjual per Kategori")
+    render_dist_box(eda_q2_agg, "total_item_revenue", "Revenue Item per Kategori")
+    st.dataframe(build_plot_stats(eda_q2_agg, ["total_sold", "total_item_revenue"]), use_container_width=True)
+    st.markdown(INTERPRETASI_EDA_Q2)
+    st.divider()
+
+    st.markdown("### Pertanyaan 3 - Kontribusi Order per State")
+    st.dataframe(eda_q3_agg, use_container_width=True)
+    render_dist_box(eda_q3_agg, "total_orders", "Total Orders per State")
+    st.dataframe(build_plot_stats(eda_q3_agg, ["total_orders"]), use_container_width=True)
+    st.markdown(INTERPRETASI_EDA_Q3)
+    st.divider()
+
+    st.markdown("### Pertanyaan 4 - Segmentasi Pelanggan Berbasis RFM")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("#### Agregasi RFM Level Pelanggan")
+        st.dataframe(eda_q4_rfm, use_container_width=True)
+    with c2:
+        st.markdown("#### Ringkasan Segmen RFM")
+        st.dataframe(eda_q4_segment.round(2), use_container_width=True)
+
+    render_dist_box(eda_q4_rfm, "recency", "Recency")
+    render_dist_box(eda_q4_rfm, "frequency", "Frequency")
+    render_dist_box(eda_q4_rfm, "monetary", "Monetary")
+    st.dataframe(build_plot_stats(eda_q4_rfm, ["recency", "frequency", "monetary"]), use_container_width=True)
+    st.markdown(INTERPRETASI_EDA_Q4)
 
 with q1:
     st.subheader(
